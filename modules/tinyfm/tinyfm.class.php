@@ -383,6 +383,47 @@ class tinyfm extends module
     }
 
     /**
+     * Команда PHP для фонового скачивания:
+     * 1. PATH_TO_PHP из config.php MajorDoMo — если это существующий исполняемый файл;
+     * 2. иначе PHP_BINARY — интерпретатор, который выполняет этот запрос (на KSWEB
+     *    PATH_TO_PHP может указывать на недоступный путь, а настоящий php-cgi — в другом
+     *    месте; на Android 10+ исполняемые файлы бывают только в папке библиотек приложения).
+     *    Только если в имени есть «php» и нет «fpm»: под php-fpm или модулем Apache
+     *    (httpd) там не интерпретатор, который можно запустить со скриптом.
+     *    С ним передаётся тот же php.ini (-c), чтобы были те же расширения (curl);
+     * 3. иначе PATH_TO_PHP как есть (имя команды, например «php») или «php».
+     * Для php-cgi добавляются -q (без заголовков), register_argc_argv (аргументы) и
+     * max_execution_time=0 (у CGI по умолчанию 30 с).
+     */
+    function phpCommand()
+    {
+        $cfg = defined('PATH_TO_PHP') && PATH_TO_PHP != '' ? trim((string)PATH_TO_PHP) : '';
+        $bin = '';
+        $ini = '';
+        if ($cfg !== '' && strpbrk($cfg, '/\\') !== false && @is_file($cfg) && @is_executable($cfg)) {
+            $bin = $cfg;
+        } elseif (defined('PHP_BINARY') && PHP_BINARY !== '' && @is_file(PHP_BINARY) && @is_executable(PHP_BINARY)
+            && stripos(basename(PHP_BINARY), 'php') !== false && stripos(basename(PHP_BINARY), 'fpm') === false
+        ) {
+            $bin = PHP_BINARY;
+            $loaded = function_exists('php_ini_loaded_file') ? php_ini_loaded_file() : false;
+            $ini = is_string($loaded) && $loaded !== '' ? $loaded : '';
+        }
+        if ($bin === '') {
+            return $cfg !== '' ? $cfg : 'php'; // как настроено (имя команды или своя строка)
+        }
+        $cmd = escapeshellarg($bin);
+        if ($ini !== '') {
+            $cmd .= ' -c ' . escapeshellarg($ini);
+        }
+        $is_cgi = $bin === PHP_BINARY ? strpos(PHP_SAPI, 'cgi') === 0 : stripos(basename($bin), 'cgi') !== false;
+        if ($is_cgi) {
+            $cmd .= ' -q -d register_argc_argv=1 -d max_execution_time=0';
+        }
+        return $cmd;
+    }
+
+    /**
      * Кнопка «Скачать»: скачивает дополнительные библиотеки из npm в modules/tinyfm/assets-extra/.
      * Запускается фоновым процессом PHP (PATH_TO_PHP), чтобы страница не ждала минутами,
      * а журнал был виден сразу. Если фоновый запуск не сработал за 10 секунд (нет exec/popen,
@@ -428,10 +469,8 @@ class tinyfm extends module
             session_write_close();
         }
 
-        $php = defined('PATH_TO_PHP') && PATH_TO_PHP != '' ? (string)PATH_TO_PHP : 'php';
-        if (strpos($php, '"') === false && strpos($php, "'") === false && is_file($php)) {
-            $php = escapeshellarg($php); // путь с пробелами (Windows: C:\Program Files\...)
-        }
+        $php = $this->phpCommand();
+        @file_put_contents($dir . '/install.log', date('H:i:s') . ' PHP: ' . $php . "\n", FILE_APPEND);
         if (tinyfm_assets_spawn($php . ' ' . escapeshellarg(DIR_MODULES . $this->name . '/assets_install.php')
             . ' --job ' . escapeshellarg($job_file))
         ) {

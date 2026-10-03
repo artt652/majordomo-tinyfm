@@ -17,8 +17,13 @@
  * настроек показывает журнал и обновляет его, пока скачивание не закончится.
  */
 
+// Запуск из командной строки: php (cli) или php-cgi без веб-запроса (KSWEB и др., где
+// PATH_TO_PHP / PHP_BINARY — php-cgi; его SAPI и из оболочки «cgi-fcgi»).
+$tinyfm_assets_cmdline = PHP_SAPI === 'cli'
+    || (strpos(PHP_SAPI, 'cgi') === 0 && !isset($_SERVER['REQUEST_METHOD']) && !isset($_SERVER['GATEWAY_INTERFACE']));
+
 // Прямой вызов по HTTP запрещён: из веба файл только подключается модулем.
-if (PHP_SAPI !== 'cli' && !defined('DIR_MODULES')) {
+if (!$tinyfm_assets_cmdline && !defined('DIR_MODULES')) {
     http_response_code(403);
     exit;
 }
@@ -526,7 +531,11 @@ if (!function_exists('tinyfm_assets_install')) {
 
 // Ручной запуск: php assets_install.php <module_dir> <tmp_dir> [registry]
 // Фоновый из модуля: php assets_install.php --job <job.json>
-if (PHP_SAPI === 'cli' && isset($argv[0]) && realpath($argv[0]) === __FILE__) {
+// (php-cgi: php-cgi -q -d register_argc_argv=1 assets_install.php --job <job.json>)
+if ($tinyfm_assets_cmdline && get_included_files()[0] === __FILE__) {
+    if (!isset($argv) || !is_array($argv)) {
+        $argv = isset($_SERVER['argv']) && is_array($_SERVER['argv']) ? $_SERVER['argv'] : array(__FILE__);
+    }
     if (isset($argv[1], $argv[2]) && $argv[1] === '--job') {
         exit(tinyfm_assets_run_job($argv[2]) === '' ? 0 : 1);
     }
