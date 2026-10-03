@@ -69,10 +69,10 @@
  <input type="hidden" name="mode" value="update">
 </form>
 
-<form action="?" method="post" style="max-width:700px;margin-top:20px" onsubmit="var b=this.querySelector('[type=submit]');b.disabled=true;b.value='Скачивание…';">
+<form action="?" method="post" style="max-width:700px;margin-top:20px" onsubmit="var b=this.querySelector('[type=submit]');b.disabled=true;b.value='Запуск…';">
  <div class="form-group">
   <label style="display:block">Дополнительные библиотеки</label>
-  <input type="submit" value="[#if ASSETS_LOCAL="1"#]Обновить[#else#]Скачать[#endif#]" class="btn btn-default" style="vertical-align:middle">
+  <input type="submit" value="[#if ASSETS_STATE="running"#]Скачивание…[#else#][#if ASSETS_LOCAL="1"#]Обновить[#else#]Скачать[#endif#][#endif#]" class="btn btn-default" style="vertical-align:middle"[#if ASSETS_STATE="running"#] disabled[#endif#]>
   [#if ASSETS_LOCAL="1"#]<span class="label label-success" style="vertical-align:middle;margin-left:8px">установлены</span>[#else#]<span class="label label-default" style="vertical-align:middle;margin-left:8px">не установлены — редактор кода грузится из интернета</span>[#endif#]
   <span class="help-block">Необязательно. Основные библиотеки уже входят в модуль — файловый
   менеджер полностью работает и без интернета. Здесь скачиваются из npm (~10 МБ, с проверкой
@@ -80,6 +80,38 @@
   Без них «Улучшенный редактор» работает только при доступе в интернет (CDN), а для
   подсветки доступны светлая и тёмная темы по умолчанию.</span>
  </div>
+ [#if ASSETS_STATE!=""#]
+ <details id="tinyfm_assets_box" data-state="[#ASSETS_STATE#]"[#if ASSETS_STATE!="ok"#] open[#endif#] style="margin-bottom:15px">
+  <summary style="cursor:pointer;display:list-item">Журнал скачивания[#if ASSETS_TIME!=""#] ([#ASSETS_TIME#])[#endif#]: [#if ASSETS_STATE="running"#]идёт…[#endif#][#if ASSETS_STATE="ok"#]успешно[#endif#][#if ASSETS_STATE="error"#]ошибка[#endif#]</summary>
+  <pre id="tinyfm_assets_log" style="max-height:240px;overflow:auto;margin-top:6px;font-size:12px;white-space:pre-wrap">[#ASSETS_LOG#]</pre>
+ </details>
+ [#endif#]
+ [#if ASSETS_STATE="running"#]
+ <a id="tinyfm_assets_poll" href="?view_mode=settings" style="display:none"></a>
+ <a id="tinyfm_assets_done" href="?view_mode=settings&assets_done=1" style="display:none"></a>
+ <script>
+ // Пока идёт скачивание — раз в 2 с перечитываем страницу настроек и обновляем журнал;
+ // по окончании открываем её заново с итогом.
+ (function(){
+  var poll=document.getElementById('tinyfm_assets_poll').href,done=document.getElementById('tinyfm_assets_done').href,busy=false;
+  var t=setInterval(function(){
+   var box=document.getElementById('tinyfm_assets_box');
+   if(!box){clearInterval(t);return;}
+   if(busy){return;}
+   busy=true;
+   fetch(poll,{credentials:'same-origin',cache:'no-store'}).then(function(r){return r.text();}).then(function(html){
+    busy=false;
+    var doc=new DOMParser().parseFromString(html,'text/html'),nb=doc.getElementById('tinyfm_assets_box'),nl=doc.getElementById('tinyfm_assets_log');
+    if(!nb||!nl){return;}
+    var pre=document.getElementById('tinyfm_assets_log');
+    pre.textContent=nl.textContent;pre.scrollTop=pre.scrollHeight;
+    if(nb.getAttribute('data-state')!=='running'){clearInterval(t);location.href=done;}
+   })['catch'](function(){busy=false;});
+  },2000);
+  var pre=document.getElementById('tinyfm_assets_log');if(pre){pre.scrollTop=pre.scrollHeight;}
+ })();
+ </script>
+ [#endif#]
  <input type="hidden" name="view_mode" value="assets">
  <input type="hidden" name="mode" value="download">
 </form>

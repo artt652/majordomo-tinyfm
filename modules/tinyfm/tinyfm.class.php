@@ -3,8 +3,8 @@
  * Tiny File Manager для MajorDoMo
  *
  * Оболочка над Tiny File Manager (https://github.com/prasathmani/tinyfilemanager).
- * Сам tinyfilemanager.php не изменяется; интеграция — через его внешний
- * config.php (modules/tinyfm/config.php), который пускает только
+ * В tinyfilemanager.php — только правка скорости fm_get_size(); интеграция — через
+ * его внешний config.php (modules/tinyfm/config.php), который пускает только
  * авторизованных в панели управления MajorDoMo.
  *
  * @package MajorDoMo
@@ -103,9 +103,11 @@ class tinyfm extends module
         }
 
         if ($this->view_mode == 'assets' && $this->mode == 'download') {
-            $err = $this->installAssets();
-            $this->redirect($err === '' ? "?view_mode=settings&assets_ok=1"
-                : "?view_mode=settings&assets_err=" . urlencode($err));
+            $this->installAssets();
+            // фоновое скачивание идёт — страница покажет журнал; иначе (уже закончилось
+            // в этом запросе или не запустилось) — сразу итог
+            $this->redirect($this->assetsStatus()['status'] === 'running'
+                ? "?view_mode=settings" : "?view_mode=settings&assets_done=1");
         }
 
         if ($this->view_mode == 'settings' && $this->mode == 'update') {
@@ -159,12 +161,17 @@ class tinyfm extends module
             $out['OK'] = 1;
         }
         $out['ASSETS_LOCAL'] = $this->assetsInstalled() ? 1 : 0;
-        if (gr('assets_ok')) {
-            $out['ASSETS_OK'] = 1;
-        }
-        $assets_err = gr('assets_err');
-        if (is_string($assets_err) && $assets_err !== '') {
-            $out['ASSETS_ERR'] = htmlspecialchars($assets_err);
+        // Журнал скачивания библиотек: состояние и последние строки
+        $st = $this->assetsStatus();
+        $out['ASSETS_STATE'] = $st['status'];
+        $out['ASSETS_LOG'] = htmlspecialchars($st['log']);
+        $out['ASSETS_TIME'] = $st['time'];
+        if (gr('assets_done')) {
+            if ($st['status'] === 'ok') {
+                $out['ASSETS_OK'] = 1;
+            } elseif ($st['status'] === 'error') {
+                $out['ASSETS_ERR'] = htmlspecialchars($st['error']);
+            }
         }
 
         // Пропуск для config.php файлового менеджера. Хранится в сессии MajorDoMo
@@ -343,19 +350,105 @@ class tinyfm extends module
     }
 
     /**
-     * Скачивает дополнительные библиотеки из npm в modules/tinyfm/assets-extra/ (кнопка «Скачать»).
-     * Возвращает '' при успехе или текст ошибки.
+     * Состояние скачивания: status ('' | running | ok | error), log (последние строки),
+     * time (когда), error. «running» без записей в журнале дольше 6 минут — прервано
+     * (curl ждёт не дольше 5 минут на пакет).
+     */
+    function assetsStatus()
+    {
+        require_once DIR_MODULES . $this->name . '/assets_install.php';
+        $dir = tinyfm_assets_status_dir(ROOT . 'cms/cached');
+        clearstatcache();
+        $res = array('status' => '', 'log' => '', 'time' => '', 'error' => '');
+        $state = @json_decode((string)@file_get_contents($dir . '/state.json'), true);
+        if (!is_array($state) || empty($state['status'])) {
+            return $res;
+        }
+        $res['status'] = in_array($state['status'], array('running', 'ok', 'error'), true) ? $state['status'] : '';
+        $res['error'] = isset($state['error']) ? (string)$state['error'] : '';
+        $log_file = $dir . '/install.log';
+        $lines = is_file($log_file) ? (array)@file($log_file, FILE_IGNORE_NEW_LINES) : array();
+        $res['log'] = implode("\n", array_slice($lines, -60));
+        $ts = !empty($state['finished']) ? (int)$state['finished'] : (isset($state['started']) ? (int)$state['started'] : 0);
+        $res['time'] = $ts ? date('d.m.Y H:i', $ts) : '';
+        if ($res['status'] === 'running') {
+            $last = max(is_file($log_file) ? (int)filemtime($log_file) : 0, isset($state['started']) ? (int)$state['started'] : 0);
+            if (time() - $last > 360) {
+                $res['status'] = 'error';
+                $res['error'] = 'прервано: журнал не обновлялся больше 6 минут';
+                $res['log'] .= ($res['log'] !== '' ? "\n" : '') . 'Прервано.';
+            }
+        }
+        return $res;
+    }
+
+    /**
+     * Кнопка «Скачать»: скачивает дополнительные библиотеки из npm в modules/tinyfm/assets-extra/.
+     * Запускается фоновым процессом PHP (PATH_TO_PHP), чтобы страница не ждала минутами,
+     * а журнал был виден сразу. Если фоновый запуск не сработал за 10 секунд (нет exec/popen,
+     * неверный PATH_TO_PHP) — скачивает в этом же запросе, журнал будет виден после.
+     *
+     * Сессия MajorDoMo (prj) закрывается до запуска: PHP держит файл сессии заблокированным
+     * весь запрос, и пока он идёт, ВСЕ остальные страницы панели этого браузера ждут.
      */
     function installAssets()
     {
+        global $session;
         require_once DIR_MODULES . $this->name . '/assets_install.php';
-        return tinyfm_assets_install(
-            rtrim(DIR_MODULES, '/') . '/' . $this->name,
-            ROOT . 'cms/cached',
-            defined('TINYFM_NPM_REGISTRY') ? (string)TINYFM_NPM_REGISTRY : '',
-            (defined('USE_PROXY') && USE_PROXY != '') ? (string)USE_PROXY : '',
-            (defined('USE_PROXY_AUTH') && USE_PROXY_AUTH != '') ? (string)USE_PROXY_AUTH : ''
+        $dir = tinyfm_assets_status_dir(ROOT . 'cms/cached');
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0777, true);
+        }
+        if ($this->assetsStatus()['status'] === 'running') {
+            return; // уже идёт
+        }
+        $job_file = $dir . '/job.json';
+        $job = array(
+            'module_dir' => rtrim(DIR_MODULES, '/') . '/' . $this->name,
+            'tmp_dir' => ROOT . 'cms/cached',
+            'registry' => defined('TINYFM_NPM_REGISTRY') ? (string)TINYFM_NPM_REGISTRY : '',
+            'proxy' => (defined('USE_PROXY') && USE_PROXY != '') ? (string)USE_PROXY : '',
+            'proxy_auth' => (defined('USE_PROXY_AUTH') && USE_PROXY_AUTH != '') ? (string)USE_PROXY_AUTH : '',
+            'started' => time(),
         );
+        @file_put_contents($dir . '/install.log', date('H:i:s') . " Запуск скачивания…\n");
+        tinyfm_assets_state_write($dir, array('status' => 'running', 'started' => time()));
+        if (@file_put_contents($job_file, json_encode($job)) === false) {
+            tinyfm_assets_state_write($dir, array('status' => 'error', 'started' => time(), 'finished' => time(),
+                'error' => 'нет прав на запись в ' . $dir));
+            return;
+        }
+        @chmod($job_file, 0600);
+
+        // Дальше в этом запросе сессия не меняется: сохраняем и снимаем блокировку
+        if (is_object($session) && method_exists($session, 'save')) {
+            $session->save();
+        }
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_write_close();
+        }
+
+        $php = defined('PATH_TO_PHP') && PATH_TO_PHP != '' ? (string)PATH_TO_PHP : 'php';
+        if (strpos($php, '"') === false && strpos($php, "'") === false && is_file($php)) {
+            $php = escapeshellarg($php); // путь с пробелами (Windows: C:\Program Files\...)
+        }
+        if (tinyfm_assets_spawn($php . ' ' . escapeshellarg(DIR_MODULES . $this->name . '/assets_install.php')
+            . ' --job ' . escapeshellarg($job_file))
+        ) {
+            for ($i = 0; $i < 100; $i++) {
+                clearstatcache(); // иначе is_file() отдаёт закэшированный результат
+                if (!is_file($job_file)) {
+                    break;
+                }
+                usleep(100000); // фоновый процесс забирает задание
+            }
+        }
+        clearstatcache();
+        if (is_file($job_file)) {
+            @file_put_contents($dir . '/install.log', date('H:i:s')
+                . " Фоновый запуск не удался — скачивание в этом запросе (страница откроется по окончании)\n", FILE_APPEND);
+            tinyfm_assets_run_job($job_file);
+        }
     }
 
     function install($data = '')

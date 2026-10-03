@@ -11,6 +11,10 @@
  * Версии — ровно те, что подключает Tiny File Manager 2.6. Каждый пакет проверяется
  * по SHA-512 из npm-реестра (dist.integrity); опубликованные в npm версии неизменяемы.
  * Из пакетов берутся только нужные файлы.
+ *
+ * Из панели скачивание идёт фоновым процессом (php assets_install.php --job <файл>):
+ * ход пишется в cms/cached/tinyfm_assets/install.log, итог — в state.json; страница
+ * настроек показывает журнал и обновляет его, пока скачивание не закончится.
  */
 
 // Прямой вызов по HTTP запрещён: из веба файл только подключается модулем.
@@ -84,7 +88,12 @@ if (!function_exists('tinyfm_assets_install')) {
         @rmdir($real);
     }
 
-    function tinyfm_assets_download($url, $file, $proxy, $proxy_auth)
+    function tinyfm_assets_mb($bytes)
+    {
+        return number_format($bytes / 1048576, 1, ',', '') . ' МБ';
+    }
+
+    function tinyfm_assets_download($url, $file, $proxy, $proxy_auth, $progress = null)
     {
         $fh = @fopen($file, 'wb');
         if (!$fh) {
@@ -98,6 +107,18 @@ if (!function_exists('tinyfm_assets_install')) {
         curl_setopt($ch, CURLOPT_TIMEOUT, 300);
         curl_setopt($ch, CURLOPT_FAILONERROR, true);
         curl_setopt($ch, CURLOPT_USERAGENT, 'MajorDoMo tinyfm');
+        if (is_callable($progress)) {
+            // не чаще раза в 2 секунды: «скачано X из Y»
+            $last = microtime(true);
+            curl_setopt($ch, CURLOPT_NOPROGRESS, false);
+            curl_setopt($ch, CURLOPT_PROGRESSFUNCTION, function ($ch, $total, $done) use ($progress, &$last) {
+                if ($done > 0 && microtime(true) - $last >= 2) {
+                    $last = microtime(true);
+                    call_user_func($progress, $done, $total);
+                }
+                return 0;
+            });
+        }
         if ($proxy !== '') {
             curl_setopt($ch, CURLOPT_PROXY, $proxy);
             if ($proxy_auth !== '') {
@@ -113,55 +134,191 @@ if (!function_exists('tinyfm_assets_install')) {
 
     /**
      * Распаковывает из .tgz только нужные пути (файлы и папки) в $dest.
-     * Сначала tar, иначе PharData.
+     * Способы по очереди: tar, PharData, встроенный разбор tar на PHP (gzopen) — последний
+     * не зависит ни от внешних программ, ни от расширения phar (важно для Windows, где
+     * tar.exe может отсутствовать или быть GNU tar из Git, а phar — вести себя иначе).
+     * Возвращает '' при успехе или описание ошибок всех способов.
      */
-    function tinyfm_assets_extract($archive, $dest, $members)
+    function tinyfm_assets_extract($archive, $dest, $members, $say = null)
     {
         $names = array();
         foreach ($members as $m) {
             $names[] = rtrim($m, '/');
         }
+        $errors = array();
+
+        // 1. tar. Запуск из папки архива с относительными путями: GNU tar (в т.ч. из Git
+        // для Windows) принимает «C:\...» за адрес удалённого хоста.
         if (function_exists('exec')) {
-            $cmd = 'tar xzf ' . escapeshellarg($archive) . ' -C ' . escapeshellarg($dest);
-            foreach ($names as $n) {
-                $cmd .= ' ' . escapeshellarg($n);
+            $cwd = getcwd();
+            if (@chdir(dirname($archive))) {
+                $dest_arg = dirname($dest) === dirname($archive) ? basename($dest) : $dest;
+                $cmd = 'tar xzf ' . escapeshellarg(basename($archive)) . ' -C ' . escapeshellarg($dest_arg);
+                foreach ($names as $n) {
+                    $cmd .= ' ' . escapeshellarg($n);
+                }
+                $out = array();
+                $res = 1;
+                @exec($cmd . ' 2>&1', $out, $res);
+                if ($cwd !== false) {
+                    @chdir($cwd);
+                }
+                if ($res === 0 && tinyfm_assets_members_exist($dest, $names)) {
+                    return '';
+                }
+                $errors[] = 'tar: ' . ($res === 0 ? 'нет нужных файлов после распаковки'
+                    : 'код ' . $res . (empty($out) ? '' : ', ' . trim((string)end($out))));
+            } else {
+                $errors[] = 'tar: нет доступа к папке архива';
             }
-            $out = array();
-            $res = 1;
-            @exec($cmd . ' 2>&1', $out, $res);
-            if ($res === 0) {
+        } else {
+            $errors[] = 'tar: exec недоступен';
+        }
+
+        // 2. PharData. В npm-архивах нет записей для папок, поэтому перебираем файлы;
+        // относительный путь — всё после «<имя архива>/» (на Windows phar:// пишет путь
+        // со своими разделителями, поэтому длину префикса не считаем).
+        if (class_exists('PharData')) {
+            try {
+                $phar = new PharData($archive);
+                $base = basename($archive) . '/';
+                foreach (new RecursiveIteratorIterator($phar) as $entry) {
+                    $pn = str_replace('\\', '/', $entry->getPathname());
+                    $pos = strpos($pn, $base);
+                    if ($pos === false) {
+                        continue;
+                    }
+                    $rel = substr($pn, $pos + strlen($base));
+                    if (tinyfm_assets_wanted($rel, $names)
+                        && !tinyfm_assets_put($dest . '/' . $rel, file_get_contents($entry->getPathname()))
+                    ) {
+                        throw new Exception('не удалось записать ' . $rel);
+                    }
+                }
+                unset($phar);
+                if (tinyfm_assets_members_exist($dest, $names)) {
+                    if (is_callable($say)) {
+                        call_user_func($say, 'распаковано через phar (' . implode('; ', $errors) . ')');
+                    }
+                    return '';
+                }
+                $errors[] = 'phar: нет нужных файлов после распаковки';
+            } catch (\Throwable $e) {
+                $errors[] = 'phar: ' . $e->getMessage();
+            }
+        } else {
+            $errors[] = 'phar: расширение не установлено';
+        }
+
+        // 3. Разбор tar на PHP
+        $err = tinyfm_assets_untar($archive, $dest, $names);
+        if ($err === '' && tinyfm_assets_members_exist($dest, $names)) {
+            if (is_callable($say)) {
+                call_user_func($say, 'распаковано встроенным способом (' . implode('; ', $errors) . ')');
+            }
+            return '';
+        }
+        $errors[] = 'php: ' . ($err !== '' ? $err : 'нет нужных файлов после распаковки');
+        return implode('; ', $errors);
+    }
+
+    function tinyfm_assets_wanted($rel, $names)
+    {
+        foreach ($names as $n) {
+            if ($rel === $n || strpos($rel, $n . '/') === 0) {
                 return true;
             }
         }
-        if (!class_exists('PharData')) {
+        return false;
+    }
+
+    function tinyfm_assets_put($target, $data)
+    {
+        if ($data === false || strpos($target, '/../') !== false) {
             return false;
         }
-        // В npm-архивах нет записей для папок, поэтому перебираем файлы
-        try {
-            $phar = new PharData($archive);
-            $prefix = 'phar://' . $phar->getPath() . '/';
-            $found = array_fill_keys($names, false);
-            foreach (new RecursiveIteratorIterator($phar) as $entry) {
-                $rel = substr($entry->getPathname(), strlen($prefix));
-                foreach ($names as $n) {
-                    if ($rel === $n || strpos($rel, $n . '/') === 0) {
-                        $target = $dest . '/' . $rel;
-                        if (!is_dir(dirname($target))) {
-                            @mkdir(dirname($target), 0777, true);
-                        }
-                        if (@file_put_contents($target, file_get_contents($entry->getPathname())) === false) {
-                            return false;
-                        }
-                        $found[$n] = true;
-                        break;
-                    }
-                }
+        if (!is_dir(dirname($target))) {
+            @mkdir(dirname($target), 0777, true);
+        }
+        return @file_put_contents($target, $data) !== false;
+    }
+
+    function tinyfm_assets_members_exist($dest, $names)
+    {
+        clearstatcache();
+        foreach ($names as $n) {
+            if (!file_exists($dest . '/' . $n)) {
+                return false;
             }
-            unset($phar);
-            return !in_array(false, $found, true);
-        } catch (\Throwable $e) {
-            return false;
         }
+        return true;
+    }
+
+    /**
+     * Минимальный распаковщик .tgz (ustar + длинные имена GNU «L» и pax «x»):
+     * только обычные файлы из нужных путей. Возвращает '' или текст ошибки.
+     */
+    function tinyfm_assets_untar($archive, $dest, $names)
+    {
+        if (!function_exists('gzopen')) {
+            return 'нет расширения zlib';
+        }
+        $gz = @gzopen($archive, 'rb');
+        if (!$gz) {
+            return 'не удалось открыть архив';
+        }
+        $long = null;
+        $ok = '';
+        while (!gzeof($gz)) {
+            $h = gzread($gz, 512);
+            if ($h === false || strlen($h) < 512) {
+                break;
+            }
+            if (trim($h, "\0") === '') {
+                break; // конец архива
+            }
+            $name = rtrim(substr($h, 0, 100), "\0");
+            $size = octdec(trim(substr($h, 124, 12), "\0 "));
+            $type = substr($h, 156, 1);
+            $prefix = rtrim(substr($h, 345, 155), "\0");
+            if (substr($h, 257, 5) === 'ustar' && $prefix !== '') {
+                $name = $prefix . '/' . $name;
+            }
+            $data = '';
+            $left = $size;
+            while ($left > 0) {
+                $chunk = gzread($gz, min(65536, $left));
+                if ($chunk === false || $chunk === '') {
+                    gzclose($gz);
+                    return 'архив обрывается';
+                }
+                $data .= $chunk;
+                $left -= strlen($chunk);
+            }
+            if ($size % 512) {
+                gzread($gz, 512 - $size % 512);
+            }
+            if ($type === 'L') {
+                $long = rtrim($data, "\0");
+                continue;
+            }
+            if ($type === 'x' && preg_match('/\d+ path=([^\n]+)\n/', $data, $m)) {
+                $long = $m[1];
+                continue;
+            }
+            if ($long !== null) {
+                $name = $long;
+                $long = null;
+            }
+            if (($type === '0' || $type === "\0") && tinyfm_assets_wanted($name, $names)
+                && !tinyfm_assets_put($dest . '/' . $name, $data)
+            ) {
+                $ok = 'не удалось записать ' . $name;
+                break;
+            }
+        }
+        gzclose($gz);
+        return $ok;
     }
 
     function tinyfm_assets_copy($src, $dst, $exclude)
@@ -194,8 +351,13 @@ if (!function_exists('tinyfm_assets_install')) {
      * Старая папка assets-extra/ заменяется только после успешной сборки.
      * Возвращает '' при успехе или текст ошибки.
      */
-    function tinyfm_assets_install($module_dir, $tmp_dir, $registry = '', $proxy = '', $proxy_auth = '')
+    function tinyfm_assets_install($module_dir, $tmp_dir, $registry = '', $proxy = '', $proxy_auth = '', $log = null)
     {
+        $say = function ($msg) use ($log) {
+            if (is_callable($log)) {
+                call_user_func($log, $msg);
+            }
+        };
         $module_dir = rtrim($module_dir, '/');
         $tmp_dir = rtrim($tmp_dir, '/');
         $registry = rtrim($registry !== '' ? $registry : 'https://registry.npmjs.org', '/');
@@ -220,22 +382,37 @@ if (!function_exists('tinyfm_assets_install')) {
             return 'не удалось создать временную папку';
         }
 
+        $say('Реестр: ' . $registry . ($proxy !== '' ? ' (через прокси ' . preg_replace('#//[^@/]*@#', '//', $proxy) . ')' : ''));
         $names = array();
         foreach (tinyfm_assets_packages() as $i => $pkg) {
             $names[] = $pkg['name'];
             $archive = $work . '/pkg' . $i . '.tgz';
             $unpack = $work . '/pkg' . $i;
-            $err = tinyfm_assets_download($registry . '/' . $pkg['path'], $archive, $proxy, $proxy_auth);
+            $name = $pkg['name'];
+            $say($name . ': скачивание…');
+            $t0 = microtime(true);
+            $err = tinyfm_assets_download($registry . '/' . $pkg['path'], $archive, $proxy, $proxy_auth,
+                function ($done, $total) use ($say, $name) {
+                    $say($name . ': ' . tinyfm_assets_mb($done) . ($total > 0 ? ' из ' . tinyfm_assets_mb($total) : ''));
+                });
             if ($err === '') {
+                $say($name . ': скачано ' . tinyfm_assets_mb((int)@filesize($archive)) . ' за '
+                    . max(1, (int)round(microtime(true) - $t0)) . ' с');
                 $sri = 'sha512-' . base64_encode((string)hash_file('sha512', $archive, true));
                 if (!hash_equals($pkg['integrity'], $sri)) {
                     $err = 'контрольная сумма не совпадает';
+                } else {
+                    $say($name . ': контрольная сумма SHA-512 совпадает');
                 }
             }
             if ($err === '') {
                 @mkdir($unpack, 0777, true);
-                if (!tinyfm_assets_extract($archive, $unpack, array_keys($pkg['files']))) {
-                    $err = 'не удалось распаковать';
+                $xerr = tinyfm_assets_extract($archive, $unpack, array_keys($pkg['files']),
+                    function ($msg) use ($say, $name) {
+                        $say($name . ': ' . $msg);
+                    });
+                if ($xerr !== '') {
+                    $err = 'не удалось распаковать (' . $xerr . ')';
                 }
             }
             if ($err === '') {
@@ -253,6 +430,7 @@ if (!function_exists('tinyfm_assets_install')) {
             }
             @unlink($archive);
             tinyfm_assets_rmdir($unpack, $allowed);
+            $say($name . ': распаковано');
         }
         @file_put_contents($work . '/assets-extra/VERSION', "Tiny File Manager 2.6 extra assets (npm)\n" . implode("\n", $names) . "\n");
 
@@ -273,17 +451,92 @@ if (!function_exists('tinyfm_assets_install')) {
         }
         tinyfm_assets_rmdir($old, $allowed);
         tinyfm_assets_rmdir($work, $allowed);
+        $say('Установлено в ' . $target);
         return '';
+    }
+
+    /**
+     * Запуск команды в фоне без ожидания. Не execInBackground() MajorDoMo: на Windows без
+     * COM он вызывает system() — запрос ждал бы конца скачивания.
+     * Linux/Android: «cmd > /dev/null 2>&1 &»; Windows: «start "" /B cmd >NUL 2>&1».
+     */
+    function tinyfm_assets_spawn($cmd)
+    {
+        if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+            if (!function_exists('popen')) {
+                return false;
+            }
+            $h = @popen('start "" /B ' . $cmd . ' >NUL 2>&1', 'r');
+            if ($h === false) {
+                return false;
+            }
+            pclose($h);
+            return true;
+        }
+        if (!function_exists('exec')) {
+            return false;
+        }
+        @exec($cmd . ' > /dev/null 2>&1 &');
+        return true;
+    }
+
+    /**
+     * Папка журнала: <tmp_dir>/tinyfm_assets/ (install.log, state.json, job.json)
+     */
+    function tinyfm_assets_status_dir($tmp_dir)
+    {
+        return rtrim($tmp_dir, '/') . '/tinyfm_assets';
+    }
+
+    function tinyfm_assets_state_write($dir, $state)
+    {
+        $tmp = $dir . '/state.json.' . getmypid() . '.tmp';
+        if (@file_put_contents($tmp, json_encode($state)) !== false) {
+            @rename($tmp, $dir . '/state.json');
+        }
+    }
+
+    /**
+     * Выполняет задание (job.json пишет модуль): скачивание с журналом и итогом.
+     * Файл задания удаляется сразу после чтения (в нём могут быть логин/пароль прокси).
+     */
+    function tinyfm_assets_run_job($job_file)
+    {
+        $job = @json_decode((string)@file_get_contents($job_file), true);
+        @unlink($job_file);
+        if (!is_array($job) || empty($job['module_dir']) || empty($job['tmp_dir'])) {
+            return 'некорректное задание';
+        }
+        $dir = tinyfm_assets_status_dir($job['tmp_dir']);
+        $started = isset($job['started']) ? (int)$job['started'] : time();
+        tinyfm_assets_state_write($dir, array('status' => 'running', 'started' => $started, 'pid' => getmypid()));
+        $log = function ($msg) use ($dir) {
+            @file_put_contents($dir . '/install.log', date('H:i:s') . ' ' . $msg . "\n", FILE_APPEND);
+        };
+        $err = tinyfm_assets_install($job['module_dir'], $job['tmp_dir'],
+            isset($job['registry']) ? (string)$job['registry'] : '',
+            isset($job['proxy']) ? (string)$job['proxy'] : '',
+            isset($job['proxy_auth']) ? (string)$job['proxy_auth'] : '', $log);
+        $log($err === '' ? 'Готово.' : 'Ошибка: ' . $err);
+        tinyfm_assets_state_write($dir, array('status' => $err === '' ? 'ok' : 'error', 'started' => $started,
+            'finished' => time(), 'error' => $err));
+        return $err;
     }
 }
 
 // Ручной запуск: php assets_install.php <module_dir> <tmp_dir> [registry]
+// Фоновый из модуля: php assets_install.php --job <job.json>
 if (PHP_SAPI === 'cli' && isset($argv[0]) && realpath($argv[0]) === __FILE__) {
+    if (isset($argv[1], $argv[2]) && $argv[1] === '--job') {
+        exit(tinyfm_assets_run_job($argv[2]) === '' ? 0 : 1);
+    }
     if (count($argv) < 3) {
         fwrite(STDERR, "usage: php assets_install.php <module_dir> <tmp_dir> [registry]\n");
         exit(2);
     }
-    $err = tinyfm_assets_install($argv[1], $argv[2], isset($argv[3]) ? $argv[3] : '');
+    $err = tinyfm_assets_install($argv[1], $argv[2], isset($argv[3]) ? $argv[3] : '', '', '', function ($msg) {
+        echo date('H:i:s') . ' ' . $msg . "\n";
+    });
     echo ($err === '' ? "OK\n" : $err . "\n");
     exit($err === '' ? 0 : 1);
 }
