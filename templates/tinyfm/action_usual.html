@@ -1,0 +1,33 @@
+<!--#
+ @version 1.0
+#-->
+[#if ACCESS_DENIED="1"#]
+<div class="alert alert-warning" style="margin:20px 10px 10px">
+ [#if ADMIN_ONLY="1"#]Файловый менеджер доступен только администраторам.[#else#]Войдите под пользователем MajorDoMo.[#endif#]
+</div>
+[#else#]
+<div style="margin:6px 0">
+ <a href="[#FM_URL#]" target="_blank" class="btn btn-default btn-sm"><i class="glyphicon glyphicon-new-window"></i> В новом окне</a>
+ [#if READONLY="1"#]<span class="label label-warning">только чтение</span>[#endif#]
+</div>
+<iframe src="[#FM_URL#]" id="tinyfm_frame" style="width:100%;height:calc(100vh - 160px);min-height:450px;border:1px solid #ccc;border-radius:4px" allowfullscreen></iframe>
+<script>
+// Высота фрейма: до низа окна, а на ПК — не короче левого меню панели (иначе под
+// фреймом остаётся пустая полоса до конца страницы); не ниже прежнего calc() из style,
+// который остаётся и без JS.
+(function(){
+ var f=document.getElementById('tinyfm_frame');
+ if(!f){return;}
+ function fit(){
+  var y=window.pageYOffset||document.documentElement.scrollTop||0,r=f.getBoundingClientRect(),top=r.top+y,bottom=window.innerHeight-15,lb=document.getElementById('left_block');
+  if(lb&&lb.offsetHeight>0){var l=lb.getBoundingClientRect();if(l.right<=r.left+1){bottom=Math.max(bottom,l.bottom+y);}}
+  f.style.height=Math.max(450,window.innerHeight-160,Math.floor(bottom-top))+'px';
+ }
+ fit();
+ window.addEventListener('resize',fit);
+ window.addEventListener('load',fit);
+ var lb=document.getElementById('left_block');
+ if(lb&&window.ResizeObserver){new ResizeObserver(fit).observe(lb);}
+})();
+</script>
+[#endif ACCESS_DENIED#]

@@ -1,0 +1,4 @@
+Font Awesome 4.7.0 by Dave Gandy - https://fontawesome.com/v4/
+Font: SIL OFL 1.1 (https://scripts.sil.org/OFL)
+CSS:  MIT License (https://opensource.org/licenses/mit-license.html)
+Source: npm package font-awesome@4.7.0

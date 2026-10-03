@@ -1,0 +1,115 @@
+<!--#
+ @version 1.0
+#-->
+[#if ACCESS_DENIED="1"#]
+<div class="alert alert-danger">Доступ запрещён: требуется вход администратора.</div>
+[#else#]
+
+[#if OK="1"#]<div class="alert alert-success"><#LANG_DATA_SAVED#></div>[#endif#]
+[#if ERR_ROOT="1"#]<div class="alert alert-danger">Папка не найдена: [#ROOT_PATH#]</div>[#endif#]
+[#if ASSETS_OK="1"#]<div class="alert alert-success">Дополнительные библиотеки установлены.</div>[#endif#]
+[#if ASSETS_ERR!=""#]<div class="alert alert-danger">Библиотеки не установлены: [#ASSETS_ERR#]</div>[#endif#]
+
+[#if VIEW_MODE="settings"#]
+<form action="?" method="post" style="max-width:700px">
+ <div class="form-group">
+  <label for="tinyfm_root_path">Корневая папка</label>
+  <input type="text" name="root_path" id="tinyfm_root_path" value="[#ROOT_PATH#]" placeholder="[#ROOT_DEFAULT#]" class="form-control">
+  <span class="help-block">Пусто — корень MajorDoMo ([#ROOT_DEFAULT#]).</span>
+ </div>
+ <div class="checkbox">
+  <label><input type="checkbox" name="readonly" value="1"[#if READONLY="1"#] checked[#endif#]> Только чтение</label>
+ </div>
+ <div class="checkbox">
+  <label><input type="checkbox" name="theme_sync" value="1"[#if THEME_SYNC="1"#] checked[#endif#]> Тема как в MajorDoMo</label>
+  <span class="help-block">Светлая/тёмная — как у панели управления (или фронтенда при открытии из «Приложений»),
+  вместе с темой редактора кода и подсветки.
+  Выбор темы в настройках самого Tiny File Manager при этом не действует.</span>
+ </div>
+ <div class="form-group">
+  <label for="tinyfm_hljs_theme">Тема подсветки при просмотре</label>
+  <select name="hljs_theme" id="tinyfm_hljs_theme" class="form-control">
+   <option value="">Автоматически — светлая / тёмная (vs / vs2015)</option>
+   [#begin HLJS_THEMES#]<option value="[#VALUE#]"[#if SELECTED="1"#] selected[#endif#]>[#TITLE#]</option>
+   [#end HLJS_THEMES#]
+  </select>
+  [#if ASSETS_LOCAL!="1"#]<span class="help-block">Остальные темы появятся после скачивания дополнительных библиотек.</span>[#endif#]
+ </div>
+ <div class="form-group">
+  <label for="tinyfm_ace_theme">Тема редактора кода</label>
+  <select name="ace_theme" id="tinyfm_ace_theme" class="form-control">
+   <option value="">Автоматически — светлая / тёмная (TextMate / Tomorrow Night)</option>
+   <optgroup label="Светлые">
+   [#begin ACE_LIGHT#]<option value="[#VALUE#]"[#if SELECTED="1"#] selected[#endif#]>[#TITLE#]</option>
+   [#end ACE_LIGHT#]
+   </optgroup>
+   <optgroup label="Тёмные">
+   [#begin ACE_DARK#]<option value="[#VALUE#]"[#if SELECTED="1"#] selected[#endif#]>[#TITLE#]</option>
+   [#end ACE_DARK#]
+   </optgroup>
+  </select>
+ </div>
+ <div class="checkbox">
+  <label><input type="checkbox" name="lang_sync" value="1"[#if LANG_SYNC="1"#] checked[#endif#]> Язык как в MajorDoMo</label>
+  <span class="help-block">Если для языка системы нет перевода Tiny File Manager,
+  остаётся язык из настроек самого Tiny File Manager.</span>
+ </div>
+ <div class="checkbox">
+  <label><input type="checkbox" name="admin_only" value="1"[#if ADMIN_ONLY="1"#] checked[#endif#]> Только для администраторов</label>
+  <span class="help-block">Если снять — файловый менеджер откроется любому пользователю MajorDoMo
+  в «Приложениях» (/apps/tinyfm.html) с теми же правами (корень, запись).
+  Пользователи без пароля и пользователь по умолчанию входят автоматически —
+  доступ получит любой в сети. Права записи в htdocs = выполнение своего PHP-кода.</span>
+ </div>
+ <div class="form-group">
+  <input type="submit" value="<#LANG_SUBMIT#>" class="btn btn-primary">
+  <a href="?view_mode=" class="btn btn-default"><#LANG_CANCEL#></a>
+ </div>
+ <input type="hidden" name="view_mode" value="settings">
+ <input type="hidden" name="mode" value="update">
+</form>
+
+<form action="?" method="post" style="max-width:700px;margin-top:20px" onsubmit="var b=this.querySelector('[type=submit]');b.disabled=true;b.value='Скачивание…';">
+ <div class="form-group">
+  <label style="display:block">Дополнительные библиотеки</label>
+  <input type="submit" value="[#if ASSETS_LOCAL="1"#]Обновить[#else#]Скачать[#endif#]" class="btn btn-default" style="vertical-align:middle">
+  [#if ASSETS_LOCAL="1"#]<span class="label label-success" style="vertical-align:middle;margin-left:8px">установлены</span>[#else#]<span class="label label-default" style="vertical-align:middle;margin-left:8px">не установлены — редактор кода грузится из интернета</span>[#endif#]
+  <span class="help-block">Необязательно. Основные библиотеки уже входят в модуль — файловый
+  менеджер полностью работает и без интернета. Здесь скачиваются из npm (~10 МБ, с проверкой
+  контрольных сумм) редактор кода для «Улучшенного редактора» и все темы подсветки.
+  Без них «Улучшенный редактор» работает только при доступе в интернет (CDN), а для
+  подсветки доступны светлая и тёмная темы по умолчанию.</span>
+ </div>
+ <input type="hidden" name="view_mode" value="assets">
+ <input type="hidden" name="mode" value="download">
+</form>
+[#else#]
+<div style="margin-bottom:8px">
+ <a href="?view_mode=settings" class="btn btn-default btn-sm"><i class="glyphicon glyphicon-cog"></i> <#LANG_SETUP#></a>
+ <a href="[#FM_URL#]" target="_blank" class="btn btn-default btn-sm"><i class="glyphicon glyphicon-new-window"></i> В новом окне</a>
+ [#if READONLY="1"#]<span class="label label-warning">только чтение</span>[#endif#]
+ [#if ADMIN_ONLY!="1"#]<span class="label label-danger">доступен всем пользователям</span>[#endif#]
+</div>
+<iframe src="[#FM_URL#]" id="tinyfm_frame" style="width:100%;height:calc(100vh - 180px);min-height:450px;border:1px solid #ccc;border-radius:4px" allowfullscreen></iframe>
+<script>
+// Высота фрейма: до низа окна, а на ПК — не короче левого меню панели (иначе под
+// фреймом остаётся пустая полоса до конца страницы); не ниже прежнего calc() из style,
+// который остаётся и без JS.
+(function(){
+ var f=document.getElementById('tinyfm_frame');
+ if(!f){return;}
+ function fit(){
+  var y=window.pageYOffset||document.documentElement.scrollTop||0,r=f.getBoundingClientRect(),top=r.top+y,bottom=window.innerHeight-15,lb=document.getElementById('left_block');
+  if(lb&&lb.offsetHeight>0){var l=lb.getBoundingClientRect();if(l.right<=r.left+1){bottom=Math.max(bottom,l.bottom+y);}}
+  f.style.height=Math.max(450,window.innerHeight-180,Math.floor(bottom-top))+'px';
+ }
+ fit();
+ window.addEventListener('resize',fit);
+ window.addEventListener('load',fit);
+ var lb=document.getElementById('left_block');
+ if(lb&&window.ResizeObserver){new ResizeObserver(fit).observe(lb);}
+})();
+</script>
+[#endif VIEW_MODE#]
+
+[#endif ACCESS_DENIED#]
