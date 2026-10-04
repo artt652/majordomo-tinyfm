@@ -444,9 +444,21 @@ class tinyfm extends module
             return; // уже идёт
         }
         $job_file = $dir . '/job.json';
+        // Только абсолютные пути: DIR_MODULES/ROOT в config.php бывают относительными
+        // («./modules/» на KSWEB), а php-cgi переходит в папку скрипта (modules/tinyfm/)
+        $module_dir = realpath(DIR_MODULES . $this->name);
+        if ($module_dir === false) {
+            $module_dir = __DIR__;
+        }
+        $tmp_dir = realpath(ROOT . 'cms/cached');
+        if ($tmp_dir === false) {
+            $tmp_dir = ROOT . 'cms/cached';
+        }
         $job = array(
-            'module_dir' => rtrim(DIR_MODULES, '/') . '/' . $this->name,
-            'tmp_dir' => ROOT . 'cms/cached',
+            'module_dir' => $module_dir,
+            'tmp_dir' => $tmp_dir,
+            'tz' => date_default_timezone_get(), // время в журнале — как в MajorDoMo
+            'ca' => tinyfm_assets_ca_detect(), // сертификаты HTTPS — как в веб-запросе
             'registry' => defined('TINYFM_NPM_REGISTRY') ? (string)TINYFM_NPM_REGISTRY : '',
             'proxy' => (defined('USE_PROXY') && USE_PROXY != '') ? (string)USE_PROXY : '',
             'proxy_auth' => (defined('USE_PROXY_AUTH') && USE_PROXY_AUTH != '') ? (string)USE_PROXY_AUTH : '',
@@ -471,7 +483,7 @@ class tinyfm extends module
 
         $php = $this->phpCommand();
         @file_put_contents($dir . '/install.log', date('H:i:s') . ' PHP: ' . $php . "\n", FILE_APPEND);
-        if (tinyfm_assets_spawn($php . ' ' . escapeshellarg(DIR_MODULES . $this->name . '/assets_install.php')
+        if (tinyfm_assets_spawn($php . ' ' . escapeshellarg($module_dir . '/assets_install.php')
             . ' --job ' . escapeshellarg($job_file))
         ) {
             for ($i = 0; $i < 100; $i++) {

@@ -98,6 +98,53 @@ if (!function_exists('tinyfm_assets_install')) {
         return number_format($bytes / 1048576, 1, ',', '') . ' МБ';
     }
 
+    /**
+     * Сертификаты CA для HTTPS. Фоновый процесс (php-cgi из оболочки) может не получить
+     * настроек веб-сервера: KSWEB, например, задаёт их своему php-cgi при запуске, а
+     * не в php.ini. Модуль передаёт в задании то, что видит веб-запрос, — здесь хранится.
+     * array('cainfo' => файл, 'capath' => папка); пусто — настройки PHP/curl как есть.
+     */
+    function tinyfm_assets_ca($set = null)
+    {
+        static $ca = array('cainfo' => '', 'capath' => '');
+        if (is_array($set)) {
+            $ca = array(
+                'cainfo' => isset($set['cainfo']) && is_string($set['cainfo']) && @is_file($set['cainfo']) ? $set['cainfo'] : '',
+                'capath' => isset($set['capath']) && is_string($set['capath']) && @is_dir($set['capath']) ? $set['capath'] : '',
+            );
+        }
+        return $ca;
+    }
+
+    /**
+     * Какие сертификаты CA видит текущий PHP (для передачи фоновому процессу)
+     */
+    function tinyfm_assets_ca_detect()
+    {
+        $file = '';
+        $dir = '';
+        foreach (array('curl.cainfo', 'openssl.cafile') as $key) {
+            $v = (string)ini_get($key);
+            if ($file === '' && $v !== '' && @is_file($v)) {
+                $file = $v;
+            }
+        }
+        $v = (string)ini_get('openssl.capath');
+        if ($v !== '' && @is_dir($v)) {
+            $dir = $v;
+        }
+        if ($file === '' && $dir === '' && function_exists('openssl_get_cert_locations')) {
+            $loc = openssl_get_cert_locations();
+            if (!empty($loc['default_cert_file']) && @is_file($loc['default_cert_file'])) {
+                $file = $loc['default_cert_file'];
+            }
+            if (!empty($loc['default_cert_dir']) && @is_dir($loc['default_cert_dir'])) {
+                $dir = $loc['default_cert_dir'];
+            }
+        }
+        return array('cainfo' => $file, 'capath' => $dir);
+    }
+
     function tinyfm_assets_download($url, $file, $proxy, $proxy_auth, $progress = null)
     {
         $fh = @fopen($file, 'wb');
@@ -112,6 +159,13 @@ if (!function_exists('tinyfm_assets_install')) {
         curl_setopt($ch, CURLOPT_TIMEOUT, 300);
         curl_setopt($ch, CURLOPT_FAILONERROR, true);
         curl_setopt($ch, CURLOPT_USERAGENT, 'MajorDoMo tinyfm');
+        $ca = tinyfm_assets_ca();
+        if ($ca['cainfo'] !== '') {
+            curl_setopt($ch, CURLOPT_CAINFO, $ca['cainfo']);
+        }
+        if ($ca['capath'] !== '') {
+            curl_setopt($ch, CURLOPT_CAPATH, $ca['capath']);
+        }
         if (is_callable($progress)) {
             // не чаще раза в 2 секунды: «скачано X из Y»
             $last = microtime(true);
@@ -439,24 +493,88 @@ if (!function_exists('tinyfm_assets_install')) {
         }
         @file_put_contents($work . '/assets-extra/VERSION', "Tiny File Manager 2.6 extra assets (npm)\n" . implode("\n", $names) . "\n");
 
-        // Замена assets-extra/
+        // Замена assets-extra/. На Windows переименовать папку нельзя, пока в ней открыт хоть
+        // один файл (антивирус, индексатор, веб-сервер отдаёт ace.js), а недоудалённая
+        // assets-extra.old от прошлого раза мешает переименованию. Поэтому: старые .old
+        // убираем как получится, переименование — с повторами, а если не вышло — новые
+        // файлы копируются поверх прежних.
         $target = $module_dir . '/assets-extra';
+        $src = $work . '/assets-extra';
+        foreach ((array)glob($module_dir . '/assets-extra.old*', GLOB_ONLYDIR) as $stale) {
+            tinyfm_assets_rmdir($stale, $allowed);
+        }
+        clearstatcache();
         $old = $module_dir . '/assets-extra.old';
-        tinyfm_assets_rmdir($old, $allowed);
-        if (is_dir($target) && !@rename($target, $old)) {
-            tinyfm_assets_rmdir($work, $allowed);
-            return 'не удалось заменить папку assets-extra';
+        if (file_exists($old)) {
+            $old .= '.' . time(); // прежняя .old не удалилась (файлы заняты)
         }
-        if (!@rename($work . '/assets-extra', $target)) {
-            if (is_dir($old)) {
-                @rename($old, $target);
+        $moved_old = !is_dir($target) || tinyfm_assets_rename($target, $old);
+        if ($moved_old && tinyfm_assets_rename($src, $target)) {
+            tinyfm_assets_rmdir($old, $allowed);
+        } else {
+            if ($moved_old && is_dir($old) && !is_dir($target)) {
+                @rename($old, $target); // вернуть прежнюю на место
             }
-            tinyfm_assets_rmdir($work, $allowed);
-            return 'не удалось переместить папку assets-extra';
+            $why = error_get_last();
+            $say('Переименовать папку не удалось' . (!empty($why['message']) ? ' (' . $why['message'] . ')' : '')
+                . ' — копирую файлы поверх');
+            if (!is_dir($target) && !@mkdir($target, 0777, true)) {
+                tinyfm_assets_rmdir($work, $allowed);
+                return 'не удалось создать папку ' . $target;
+            }
+            $failed = tinyfm_assets_overwrite($src, $target);
+            if ($failed !== '') {
+                tinyfm_assets_rmdir($work, $allowed);
+                return 'не удалось заменить файл ' . $failed . ' (занят другой программой? закройте вкладки с редактором и повторите)';
+            }
         }
-        tinyfm_assets_rmdir($old, $allowed);
+        clearstatcache();
         tinyfm_assets_rmdir($work, $allowed);
         $say('Установлено в ' . $target);
+        return '';
+    }
+
+    /**
+     * rename() с повторами: на Windows папку может ненадолго держать антивирус
+     */
+    function tinyfm_assets_rename($from, $to)
+    {
+        for ($i = 0; $i < 5; $i++) {
+            if (@rename($from, $to)) {
+                return true;
+            }
+            clearstatcache();
+            usleep(700000);
+        }
+        return false;
+    }
+
+    /**
+     * Копирует все файлы $src поверх $dst. Возвращает '' или путь файла, который не записался.
+     */
+    function tinyfm_assets_overwrite($src, $dst)
+    {
+        foreach (scandir($src) as $item) {
+            if ($item === '.' || $item === '..') {
+                continue;
+            }
+            $from = $src . '/' . $item;
+            $to = $dst . '/' . $item;
+            if (is_dir($from)) {
+                if (!is_dir($to) && !@mkdir($to, 0777, true)) {
+                    return $to;
+                }
+                $failed = tinyfm_assets_overwrite($from, $to);
+                if ($failed !== '') {
+                    return $failed;
+                }
+            } elseif (!@copy($from, $to)) {
+                usleep(500000);
+                if (!@copy($from, $to)) {
+                    return $to;
+                }
+            }
+        }
         return '';
     }
 
@@ -512,12 +630,22 @@ if (!function_exists('tinyfm_assets_install')) {
         if (!is_array($job) || empty($job['module_dir']) || empty($job['tmp_dir'])) {
             return 'некорректное задание';
         }
+        if (!empty($job['tz']) && is_string($job['tz']) && in_array($job['tz'], timezone_identifiers_list(), true)) {
+            date_default_timezone_set($job['tz']);
+        }
         $dir = tinyfm_assets_status_dir($job['tmp_dir']);
+        if (isset($job['ca']) && is_array($job['ca'])) {
+            tinyfm_assets_ca($job['ca']);
+        }
         $started = isset($job['started']) ? (int)$job['started'] : time();
         tinyfm_assets_state_write($dir, array('status' => 'running', 'started' => $started, 'pid' => getmypid()));
         $log = function ($msg) use ($dir) {
             @file_put_contents($dir . '/install.log', date('H:i:s') . ' ' . $msg . "\n", FILE_APPEND);
         };
+        $ca = tinyfm_assets_ca();
+        if ($ca['cainfo'] !== '' || $ca['capath'] !== '') {
+            $log('Сертификаты: ' . trim($ca['cainfo'] . ' ' . $ca['capath']));
+        }
         $err = tinyfm_assets_install($job['module_dir'], $job['tmp_dir'],
             isset($job['registry']) ? (string)$job['registry'] : '',
             isset($job['proxy']) ? (string)$job['proxy'] : '',
