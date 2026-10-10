@@ -18,8 +18,10 @@ class tinyfm extends module
 
     // Основные библиотеки (bootstrap, jquery, font-awesome, dropzone, datatables,
     // highlight.js) входят в модуль: modules/tinyfm/assets/ — всё работает и офлайн.
-    // Дополнительные (редактор ace, все темы подсветки) — modules/tinyfm/assets-extra/,
-    // скачиваются из npm кнопкой в настройках (assets_install.php); без них ace грузится с CDN.
+    // Дополнительные (редактор ace, все темы подсветки) — cms/tinyfm/assets-extra/ (вне папки
+    // модуля: Маркет при удалении/переустановке стирает modules/tinyfm целиком), скачиваются
+    // из npm кнопкой в настройках (assets_install.php); без них ace грузится с CDN.
+    // Прежнее место modules/tinyfm/assets-extra/ читается как запасное и переносится в cms/.
     // Зеркало npm можно задать в htdocs/config.php: Define('TINYFM_NPM_REGISTRY', 'https://...');
     const ASSETS_MARKER = 'assets-extra/ace/ace.js';
 
@@ -101,6 +103,7 @@ class tinyfm extends module
         if (!is_array($this->config)) {
             $this->config = array();
         }
+        $this->migrateExtra();
 
         if ($this->view_mode == 'assets' && $this->mode == 'download') {
             $this->installAssets();
@@ -282,13 +285,14 @@ class tinyfm extends module
 
     /**
      * Темы подсветки highlight.js, которые есть на диске: встроенные (assets/) и
-     * дополнительные (assets-extra/, в т.ч. base16/…). Имя — без «.min.css».
+     * дополнительные (cms/tinyfm/assets-extra/ или прежнее место, в т.ч. base16/…).
+     * Имя — без «.min.css».
      */
     function hljsThemes()
     {
         $res = array();
-        foreach (array('assets', 'assets-extra') as $dir) {
-            $base = DIR_MODULES . $this->name . '/' . $dir . '/highlight/styles/';
+        foreach (array(DIR_MODULES . $this->name . '/assets', $this->extraDir(), $this->extraDir(true)) as $dir) {
+            $base = $dir . '/highlight/styles/';
             foreach (array('', 'base16/') as $sub) {
                 foreach ((array)glob($base . $sub . '*.min.css') as $file) {
                     if (is_string($file) && $file !== '') {
@@ -346,7 +350,32 @@ class tinyfm extends module
 
     function assetsInstalled()
     {
-        return is_file(DIR_MODULES . $this->name . '/' . self::ASSETS_MARKER);
+        return is_file($this->extraDir() . '/ace/ace.js') || is_file($this->extraDir(true) . '/ace/ace.js');
+    }
+
+    /**
+     * Папка дополнительных библиотек: cms/tinyfm/assets-extra ($legacy — прежнее место в модуле)
+     */
+    function extraDir($legacy = false)
+    {
+        return $legacy ? DIR_MODULES . $this->name . '/assets-extra' : ROOT . 'cms/tinyfm/assets-extra';
+    }
+
+    /**
+     * Перенос библиотек, скачанных прежней версией модуля, из modules/tinyfm/ в cms/tinyfm/.
+     * Если перенести не удалось — они читаются и с прежнего места.
+     */
+    function migrateExtra()
+    {
+        $old = $this->extraDir(true);
+        $new = $this->extraDir();
+        if (!is_dir($old) || is_dir($new)) {
+            return;
+        }
+        if (!is_dir(dirname($new))) {
+            @mkdir(dirname($new), 0777, true);
+        }
+        @rename($old, $new);
     }
 
     /**
@@ -424,7 +453,7 @@ class tinyfm extends module
     }
 
     /**
-     * Кнопка «Скачать»: скачивает дополнительные библиотеки из npm в modules/tinyfm/assets-extra/.
+     * Кнопка «Скачать»: скачивает дополнительные библиотеки из npm в cms/tinyfm/assets-extra/.
      * Запускается фоновым процессом PHP (PATH_TO_PHP), чтобы страница не ждала минутами,
      * а журнал был виден сразу. Если фоновый запуск не сработал за 10 секунд (нет exec/popen,
      * неверный PATH_TO_PHP) — скачивает в этом же запросе, журнал будет виден после.
@@ -450,12 +479,21 @@ class tinyfm extends module
         if ($module_dir === false) {
             $module_dir = __DIR__;
         }
+        // куда ставить: cms/tinyfm/ (внутри будет assets-extra/)
+        $dest = dirname($this->extraDir());
+        if (!is_dir($dest)) {
+            @mkdir($dest, 0777, true);
+        }
+        $dest_dir = realpath($dest);
+        if ($dest_dir === false) {
+            $dest_dir = $dest;
+        }
         $tmp_dir = realpath(ROOT . 'cms/cached');
         if ($tmp_dir === false) {
             $tmp_dir = ROOT . 'cms/cached';
         }
         $job = array(
-            'module_dir' => $module_dir,
+            'module_dir' => $dest_dir, // папка, в которой будет assets-extra/
             'tmp_dir' => $tmp_dir,
             'tz' => date_default_timezone_get(), // время в журнале — как в MajorDoMo
             'ca' => tinyfm_assets_ca_detect(), // сертификаты HTTPS — как в веб-запросе

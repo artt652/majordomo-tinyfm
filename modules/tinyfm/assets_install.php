@@ -1,6 +1,6 @@
 <?php
 /**
- * Дополнительные библиотеки Tiny File Manager (modules/tinyfm/assets-extra/) из npm:
+ * Дополнительные библиотеки Tiny File Manager (cms/tinyfm/assets-extra/) из npm:
  * редактор кода ace («Улучшенный редактор») и все темы подсветки highlight.js.
  *
  * Основные библиотеки (bootstrap, jquery, font-awesome, dropzone, datatables,
@@ -407,7 +407,8 @@ if (!function_exists('tinyfm_assets_install')) {
 
     /**
      * Скачивает пакеты из npm, проверяет SHA-512 и собирает <module_dir>/assets-extra.
-     * Старая папка assets-extra/ заменяется только после успешной сборки.
+     * $module_dir — папка, в которой лежит assets-extra/ (модуль передаёт cms/tinyfm;
+     * имя параметра прежнее). Старая assets-extra/ заменяется только после успешной сборки.
      * Возвращает '' при успехе или текст ошибки.
      */
     function tinyfm_assets_install($module_dir, $tmp_dir, $registry = '', $proxy = '', $proxy_auth = '', $log = null)
@@ -433,6 +434,9 @@ if (!function_exists('tinyfm_assets_install')) {
         }
         if (!is_dir($tmp_dir)) {
             @mkdir($tmp_dir, 0777, true);
+        }
+        if (!is_dir($module_dir)) {
+            @mkdir($module_dir, 0777, true);
         }
         if (!is_writable($module_dir) || !is_writable($tmp_dir)) {
             return 'нет прав на запись в ' . $module_dir . ' или ' . $tmp_dir;

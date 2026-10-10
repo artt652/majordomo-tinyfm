@@ -348,7 +348,9 @@ unset($tinyfm_session, $tinyfm_flag, $tinyfm_allowed, $tinyfm_root, $tinyfm_docr
 //   assets/       — основные, входят в модуль: bootstrap, jquery, font-awesome,
 //                   dropzone, datatables, highlight.js (+ темы vs / vs2015);
 //   assets-extra/ — дополнительные, кнопка «Скачать» в настройках: редактор ace
-//                   и все темы подсветки highlight.js.
+//                   и все темы подсветки highlight.js. Лежат в cms/tinyfm/assets-extra/
+//                   (переживают переустановку модуля: Маркет удаляет modules/tinyfm целиком);
+//                   прежнее место modules/tinyfm/assets-extra/ читается как запасное.
 // Версии совпадают с теми, что подключает TFM 2.6 (bootstrap/jquery сверены по SRI-хэшам).
 if (!function_exists('tinyfm_local_assets')) {
     function tinyfm_local_assets($buffer)
@@ -359,13 +361,23 @@ if (!function_exists('tinyfm_local_assets')) {
         }
         $self = isset($_SERVER['PHP_SELF']) ? (string)$_SERVER['PHP_SELF'] : '';
         $url = rtrim(str_replace('\\', '/', dirname($self)), '/') . '/';
+        // Где лежит файл: 'assets/…' — в модуле; 'assets-extra/…' — в cms/tinyfm/, иначе
+        // в прежнем месте (модуль). Возвращает URL или '' (файла нет — остаётся CDN).
+        $root_dir = dirname(dirname(__DIR__));
+        $root_url = preg_replace('#/modules/tinyfm/?$#', '', rtrim($url, '/')) . '/';
+        $resolve = function ($rel) use ($url, $root_dir, $root_url) {
+            if (strpos($rel, 'assets-extra/') === 0 && is_file($root_dir . '/cms/tinyfm/' . $rel)) {
+                return $root_url . 'cms/tinyfm/' . $rel;
+            }
+            return is_file(__DIR__ . '/' . $rel) ? $url . $rel : '';
+        };
         // $highlightjs_style TFM снимает unset() (строка ~481), берём константу
         $style = defined('FM_HIGHLIGHTJS_STYLE') ? (string)FM_HIGHLIGHTJS_STYLE : 'vs';
         if (!preg_match('#^[a-zA-Z0-9._/-]+$#', $style) || strpos($style, '..') !== false) {
             $style = 'vs';
         }
         $style_file = 'assets-extra/highlight/styles/' . $style . '.min.css';
-        if (!is_file(__DIR__ . '/' . $style_file)) {
+        if ($resolve($style_file) === '') {
             $style_file = 'assets/highlight/styles/' . $style . '.min.css';
         }
         // ключ $external => array(файл, шаблон тега)
@@ -387,10 +399,11 @@ if (!function_exists('tinyfm_local_assets')) {
             if (!isset($external[$key]) || !is_string($external[$key]) || $external[$key] === '') {
                 continue;
             }
-            if (is_file(__DIR__ . '/' . $item[0])) {
+            $file_url = $resolve($item[0]);
+            if ($file_url !== '') {
                 // Заменяем только целые теги из $external: в содержимом файлов, которое TFM
                 // выводит через htmlspecialchars/fm_enc, символ "<" экранирован и совпасть не может.
-                $map[$external[$key]] = sprintf($item[1], $url . $item[0]);
+                $map[$external[$key]] = sprintf($item[1], $file_url);
             } else {
                 $all_local = false;
             }
