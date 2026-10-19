@@ -434,6 +434,13 @@ if (!function_exists('tinyfm_editor_fix')) {
         if ($buffer === '' || strpos($buffer, '<div id="editor"') === false) {
             return $buffer;
         }
+        // Upstream задаёт режиму ace «inline: true» для всех файлов. Для PHP это значит «код
+        // без открывающего тега PHP», поэтому у любого .php-файла на 1-й строке — ложная ошибка
+        // «Syntax error, unexpected '<'». inline: false — обычный режим (HTML со вставками PHP);
+        // для остальных режимов ace этот параметр не используется. Совпасть с содержимым
+        // файла нельзя: TFM выводит его через htmlspecialchars (кавычки экранированы).
+        $buffer = preg_replace('#(setMode\(\{\s*path:\s*"ace/mode/[a-z0-9_]+",\s*)inline:\s*true#',
+            '$1inline: false', $buffer, 1);
         $pos = strrpos($buffer, '</body>');
         if ($pos === false) {
             return $buffer;
